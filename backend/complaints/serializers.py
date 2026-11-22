@@ -15,7 +15,7 @@ class ComplaintSerializer(serializers.ModelSerializer):
     history = ComplaintHistorySerializer(many=True, read_only=True)
     class Meta:
         model = Complaint
-        fields = ["id", "complaint_id", "citizen", "citizen_username", "department", "department_name", "assigned_officer", "assigned_officer_username", "title", "description", "category", "location", "image", "resolution_image", "status", "priority", "resolution_remarks", "rejection_reason", "created_at", "updated_at", "resolved_at", "history"]
+        fields = ["id", "complaint_id", "citizen", "citizen_username", "department", "department_name", "assigned_officer", "assigned_officer_username", "title", "description", "category", "location", "latitude", "longitude", "image", "resolution_image", "status", "priority", "resolution_remarks", "rejection_reason", "created_at", "updated_at", "resolved_at", "history"]
         read_only_fields = ["id", "complaint_id", "citizen", "citizen_username", "department", "department_name", "assigned_officer", "assigned_officer_username", "status", "priority", "resolution_image", "resolution_remarks", "rejection_reason", "created_at", "updated_at", "resolved_at", "history"]
     def validate_title(self, value):
         if not value.strip():

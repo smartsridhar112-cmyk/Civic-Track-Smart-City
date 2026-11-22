@@ -1,9 +1,16 @@
 from django.contrib.auth import get_user_model
+from django.contrib.auth.hashers import check_password, make_password
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError
+from django.core.mail import send_mail
+from django.utils.crypto import get_random_string
+from django.utils import timezone
+from datetime import timedelta
+from .models import Department, PasswordResetOTP
 from rest_framework import generics, mixins, permissions, status, viewsets
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from .models import Department
 from .permissions import IsAdmin
 from .serializers import (
     DepartmentSerializer,
@@ -13,6 +20,80 @@ from .serializers import (
 )
 
 User = get_user_model()
+
+
+def issue_email_code(user, subject, message):
+    recent = PasswordResetOTP.objects.filter(
+        user=user,
+        purpose=PasswordResetOTP.Purpose.PASSWORD_RESET,
+        created_at__gte=timezone.now() - timedelta(minutes=1),
+    ).exists()
+    if recent:
+        return
+    code = get_random_string(6, allowed_chars="0123456789")
+    PasswordResetOTP.objects.filter(user=user, purpose=PasswordResetOTP.Purpose.PASSWORD_RESET).delete()
+    PasswordResetOTP.objects.create(
+        user=user,
+        purpose=PasswordResetOTP.Purpose.PASSWORD_RESET,
+        code_hash=make_password(code),
+        expires_at=timezone.now() + timedelta(minutes=10),
+    )
+    send_mail(subject, message.format(code=code), None, [user.email], fail_silently=False)
+
+
+class PasswordResetRequestView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        email = str(request.data.get("email", "")).strip().lower()
+        user = User.objects.filter(email__iexact=email, is_active=True).first() if email else None
+        # Keep the response identical whether or not the account exists.
+        if user:
+            issue_email_code(
+                user,
+                "Your CivicTrack password reset code",
+                "Your password reset code is {code}. It expires in 10 minutes.",
+            )
+        return Response({"detail": "If an active account matches that email, a reset code has been sent."})
+
+
+class PasswordResetConfirmView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        email = str(request.data.get("email", "")).strip().lower()
+        code = str(request.data.get("code", "")).strip()
+        new_password = request.data.get("new_password", "")
+        if not email or not code or not new_password:
+            return Response({"detail": "Email, code, and new password are required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = User.objects.filter(email__iexact=email, is_active=True).first()
+        reset = PasswordResetOTP.objects.filter(
+            user=user,
+            purpose=PasswordResetOTP.Purpose.PASSWORD_RESET,
+        ).first() if user else None
+        if not reset or reset.expires_at <= timezone.now() or reset.attempts >= 5:
+            if reset and reset.attempts >= 5:
+                reset.delete()
+            return Response({"code": "The code is invalid or expired."}, status=status.HTTP_400_BAD_REQUEST)
+        reset.attempts += 1
+        reset.save(update_fields=["attempts"])
+        if not check_password(code, reset.code_hash):
+            return Response({"code": "The code is invalid or expired."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            validate_password(new_password, user=user)
+        except ValidationError as exc:
+            return Response({"new_password": list(exc.messages)}, status=status.HTTP_400_BAD_REQUEST)
+
+        user.set_password(new_password)
+        user.save(update_fields=["password"])
+        PasswordResetOTP.objects.filter(
+            user=user,
+            purpose=PasswordResetOTP.Purpose.PASSWORD_RESET,
+        ).delete()
+        return Response({"detail": "Password changed successfully. You can now sign in."})
+
 
 class RegisterView(generics.CreateAPIView):
     serializer_class = RegisterSerializer

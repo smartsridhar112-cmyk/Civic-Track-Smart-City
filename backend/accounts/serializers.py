@@ -46,7 +46,7 @@ class OfficerRegisterSerializer(RegisterSerializer):
         password = validated_data.pop("password")
         user = User(**validated_data)
         user.role = User.Role.OFFICER
-        user.is_active = False
+        user.is_active = True
         user.set_password(password)
         user.save()
         return user

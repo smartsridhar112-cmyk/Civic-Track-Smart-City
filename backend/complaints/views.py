@@ -1,6 +1,4 @@
-
 from typing import cast
-
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -11,14 +9,13 @@ from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.request import Request
 from rest_framework.response import Response
-
 from accounts.models import Department, User
 from .models import Complaint, ComplaintHistory
 from .serializers import ComplaintSerializer, ComplaintStatusSerializer
 
 
 def department_for_category(category):
-    """Resolve common department naming variations for a complaint category."""
+
     label = Complaint.Category(category).label
     aliases = {
         Complaint.Category.ROAD: ("road", "roads", "road damage", "public works"),
@@ -122,14 +119,49 @@ class ComplaintViewSet(viewsets.ModelViewSet):
         )
 
     def update(self, request, *args, **kwargs):
-        raise PermissionDenied(
-            "Use the status or assignment endpoints to update a complaint."
-        )
+        return self._update_citizen_complaint(request, partial=False, **kwargs)
 
     def partial_update(self, request, *args, **kwargs):
-        raise PermissionDenied(
-            "Use the status or assignment endpoints to update a complaint."
-        )
+        return self._update_citizen_complaint(request, partial=True, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        complaint = self.get_object()
+        user = cast(User, request.user)
+        if user.role != User.Role.CITIZEN or complaint.citizen_id != user.id:
+            raise PermissionDenied("Only the citizen who submitted this complaint can delete it.")
+        if complaint.status != Complaint.Status.SUBMITTED:
+            raise ValidationError({"status": "A complaint can only be deleted while it is submitted."})
+        complaint.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    def _update_citizen_complaint(self, request, *, partial, **kwargs):
+        complaint = self.get_object()
+        user = cast(User, request.user)
+        if user.role != User.Role.CITIZEN or complaint.citizen_id != user.id:
+            raise PermissionDenied("Only the citizen who submitted this complaint can edit it.")
+        if complaint.status != Complaint.Status.SUBMITTED:
+            raise ValidationError({"status": "A complaint can only be edited while it is submitted."})
+
+        serializer = self.get_serializer(complaint, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        old_category = complaint.category
+        with transaction.atomic():
+            complaint = serializer.save()
+            if complaint.category != old_category:
+                department = Department.objects.filter(
+                    complaint_category=complaint.category
+                ).first() or department_for_category(complaint.category)
+                officer = None
+                if department:
+                    officer = User.objects.filter(
+                        role=User.Role.OFFICER,
+                        department_id=department.id,
+                        is_active=True,
+                    ).order_by("id").first()
+                complaint.department = department
+                complaint.assigned_officer = officer
+                complaint.save(update_fields=["department", "assigned_officer", "updated_at"])
+        return Response(self.get_serializer(complaint).data)
 
     @action(detail=True, methods=["post"], url_path="status")
     def update_status(self, request, pk=None):

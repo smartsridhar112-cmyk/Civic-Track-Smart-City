@@ -1,0 +1,10 @@
+Civic-Track-Smart-City/
+├── backend/
+│   ├── manage.py
+│   ├── requirements.txt
+│   └── ...
+├── frontend/
+│   ├── package.json
+│   ├── vite.config.js
+│   └── ...
+└── vercel.json

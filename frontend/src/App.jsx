@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { AlertCircle, CheckCircle2, ClipboardList, LogOut, MapPin, Plus, RefreshCw, Send } from "lucide-react";
-import { login, registerCitizen, requestOfficerAccount, getProfile, getDepartments, getComplaints, createComplaint, updateComplaintStatus, logout } from "./services/api";
+import { login, registerCitizen, requestOfficerAccount, requestPasswordReset, confirmPasswordReset, getProfile, getDepartments, getComplaints, createComplaint, updateComplaint, deleteComplaint, updateComplaintStatus, logout } from "./services/api";
+import GoogleMapPicker from "./components/GoogleMapPicker";
 
 const categories = ["ROAD", "GARBAGE", "WATER", "ELECTRICITY", "DRAINAGE", "OTHER"];
 const statusColors = { SUBMITTED: "bg-blue-100 text-blue-800", IN_PROGRESS: "bg-amber-100 text-amber-800", RESOLVED: "bg-green-100 text-green-800", REJECTED: "bg-red-100 text-red-800" };
@@ -8,11 +9,14 @@ const statusColors = { SUBMITTED: "bg-blue-100 text-blue-800", IN_PROGRESS: "bg-
 export default function App() {
   const [user, setUser] = useState(null);
   const [authMode, setAuthMode] = useState("login");
+  const [resetStep, setResetStep] = useState("request");
+  const [reset, setReset] = useState({ email: "", code: "", new_password: "" });
   const [auth, setAuth] = useState({ username: "", email: "", first_name: "", last_name: "", phone: "", password: "", password_confirm: "", department: "" });
   const [departments, setDepartments] = useState([]);
-  const [form, setForm] = useState({ title: "", description: "", category: "ROAD", location: "", image: null });
+  const [form, setForm] = useState({ title: "", description: "", category: "ROAD", location: "", latitude: "", longitude: "", image: null });
   const [complaints, setComplaints] = useState([]);
   const [showForm, setShowForm] = useState(false);
+  const [editingId, setEditingId] = useState(null);
   const [resolvingId, setResolvingId] = useState(null);
   const [resolution, setResolution] = useState({ remarks: "", image: null });
   const [search, setSearch] = useState("");
@@ -44,15 +48,46 @@ export default function App() {
       getDepartments().then(({ data }) => setDepartments(data.results ?? data)).catch(() => setDepartments([]));
     }
   }, [authMode]);
+  useEffect(() => {
+    const elements = document.querySelectorAll(".scroll-reveal, .dashboard-main article");
+    if (!("IntersectionObserver" in window)) {
+      elements.forEach(element => element.classList.add("is-visible"));
+      return;
+    }
+    const observer = new IntersectionObserver(entries => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          entry.target.classList.add("is-visible");
+          observer.unobserve(entry.target);
+        }
+      });
+    }, { threshold: 0.12, rootMargin: "0px 0px -32px 0px" });
+    elements.forEach(element => observer.observe(element));
+    return () => observer.disconnect();
+  }, [user, authMode, complaints.length, showForm]);
   async function handleAuth(e) {
     e.preventDefault(); setError(""); setAuthSuccess(""); setLoading(true);
     try {
-      if (authMode === "register") { await registerCitizen(auth); await login(auth.username, auth.password); }
+      if (authMode === "forgot") {
+        if (resetStep === "request") {
+          const { data } = await requestPasswordReset(reset.email);
+          setAuthSuccess(data.detail); setResetStep("confirm");
+        } else {
+          const { data } = await confirmPasswordReset(reset);
+          setAuthMode("login"); setResetStep("request"); setReset({ email: "", code: "", new_password: "" });
+          setAuthSuccess(data.detail);
+        }
+        return;
+      }
+      if (authMode === "register") {
+        await registerCitizen(auth);
+        await login(auth.username, auth.password);
+      }
       else if (authMode === "officer-register") {
         const { department, ...officerDetails } = auth;
         await requestOfficerAccount({ ...officerDetails, department });
         setAuthMode("officer");
-        setAuthSuccess("Your officer account request was submitted. An administrator must activate it before you can sign in.");
+        setAuthSuccess("Your officer account was created. You can now sign in.");
         return;
       }
       else await login(auth.username, auth.password);
@@ -78,13 +113,30 @@ export default function App() {
     e.preventDefault(); setError(""); setNotice(""); setLoading(true);
     try {
       const data = new FormData();
-      ["title", "description", "category", "location"].forEach(k => data.append(k, form[k]));
+      ["title", "description", "category", "location", "latitude", "longitude"].forEach(k => { if (form[k] !== "") data.append(k, form[k]); });
       if (form.image) data.append("image", form.image);
-      await createComplaint(data);
-      setForm({ title: "", description: "", category: "ROAD", location: "", image: null });
-      setShowForm(false); setNotice("Complaint submitted successfully."); await loadComplaints();
-    } catch (err) { setError(JSON.stringify(err.response?.data ?? "Submission failed.")); }
+      if (editingId) await updateComplaint(editingId, data);
+      else await createComplaint(data);
+      setForm({ title: "", description: "", category: "ROAD", location: "", latitude: "", longitude: "", image: null });
+      setEditingId(null); setShowForm(false); setNotice(editingId ? "Complaint updated successfully." : "Complaint submitted successfully."); await loadComplaints();
+    } catch (err) { setError(JSON.stringify(err.response?.data ?? (editingId ? "Update failed." : "Submission failed."))); }
     finally { setLoading(false); }
+  }
+  function editComplaint(c) {
+    setForm({ title: c.title, description: c.description, category: c.category, location: c.location, latitude: c.latitude ?? "", longitude: c.longitude ?? "", image: null });
+    setEditingId(c.id); setShowForm(true); setError(""); setNotice("");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+  async function removeComplaint(c) {
+    if (!window.confirm("Delete this complaint? This cannot be undone.")) return;
+    setError(""); setNotice("");
+    try {
+      await deleteComplaint(c.id);
+      setNotice("Complaint deleted.");
+      await loadComplaints();
+    } catch (err) {
+      setError(JSON.stringify(err.response?.data ?? "Unable to delete complaint."));
+    }
   }
   async function startWork(c) {
     try { await updateComplaintStatus(c.id, { status: "IN_PROGRESS", remarks: "Work has started." }); setNotice("Status updated."); await loadComplaints(); }
@@ -106,44 +158,48 @@ export default function App() {
   }
   function signOut() { logout(); setUser(null); setAuthMode("login"); setComplaints([]); setError(""); setNotice(""); }
 
-  if (!user) return <main className="flex min-h-screen items-center justify-center bg-slate-100 p-4"><section className="w-full max-w-md rounded-2xl bg-white p-8 shadow-lg">
-    <div className="mb-6 flex items-center gap-3"><div className={`rounded-xl p-3 text-white ${authMode.startsWith("officer") ? "bg-slate-800" : "bg-blue-700"}`}><MapPin size={26} /></div><div><h1 className="text-2xl font-bold">CivicTrack</h1><p className="text-sm text-slate-500">{authMode.startsWith("officer") ? "Officer Portal" : "Smart City Complaint System"}</p></div></div>
-    <h2 className="mb-2 text-xl font-semibold">{authMode === "register" ? "Create a citizen account" : authMode === "officer-register" ? "Request an officer account" : authMode === "officer" ? "Officer sign in" : "Welcome back"}</h2>
+  if (!user) return <main className="auth-shell flex min-h-screen items-center justify-center p-4"><section className="auth-card w-full max-w-md rounded-3xl bg-white p-8">
+    <div className="mb-7 flex items-center gap-4"><div className={`auth-brand-icon rounded-2xl p-3 text-white ${authMode.startsWith("officer") ? "bg-slate-800" : "bg-blue-700"}`}><MapPin size={27} /></div><div><h1 className="text-2xl font-bold tracking-tight">CivicTrack</h1><p className="text-sm text-slate-500">{authMode.startsWith("officer") ? "Officer Portal" : "Smart City Complaint System"}</p></div></div>
+    <h2 className="mb-2 text-xl font-semibold">{authMode === "register" ? "Create a citizen account" : authMode === "officer-register" ? "Create an officer account" : authMode === "officer" ? "Officer sign in" : authMode === "forgot" ? "Reset your password" : "Welcome back"}</h2>
     {authMode === "officer" && <p className="mb-5 text-sm text-slate-600">Sign in to review citizen reports and update their progress.</p>}
-    {authMode === "officer-register" && <p className="mb-5 text-sm text-slate-600">Submit your details. An administrator will review and activate your account.</p>}
-    {authMode === "login" && <p className="mb-5 text-sm text-slate-600">Sign in to report and track public issues.</p>}
+    {authMode === "officer-register" && <p className="mb-5 text-sm text-slate-600">Create an officer account to review citizen reports and update their progress.</p>}
+    {(authMode === "login" || authMode === "forgot") && <p className="mb-5 text-sm text-slate-600">{authMode === "forgot" ? "We’ll email a one-time code if an account matches." : "Sign in to report and track public issues."}</p>}
     {authSuccess && <p className="mb-4 rounded-lg bg-green-50 p-3 text-sm text-green-800">{authSuccess}</p>}
     <form onSubmit={handleAuth} className="space-y-3">
-      <input required className="w-full rounded-lg border p-3" placeholder="Username" value={auth.username} onChange={e => setAuth({ ...auth, username: e.target.value })} />
+      {authMode === "forgot" ? <><input required type="email" className="w-full rounded-lg border p-3" placeholder="Account email" value={reset.email} onChange={e => setReset({ ...reset, email: e.target.value })} />{resetStep === "confirm" && <><input required inputMode="numeric" maxLength="6" className="w-full rounded-lg border p-3" placeholder="6-digit code" value={reset.code} onChange={e => setReset({ ...reset, code: e.target.value.replace(/\D/g, "") })} /><input required minLength="8" type="password" className="w-full rounded-lg border p-3" placeholder="New password (at least 8 characters)" value={reset.new_password} onChange={e => setReset({ ...reset, new_password: e.target.value })} /></>}</> : <input required className="w-full rounded-lg border p-3" placeholder="Username" value={auth.username} onChange={e => setAuth({ ...auth, username: e.target.value })} />}
       {(authMode === "register" || authMode === "officer-register") && <><input required type="email" className="w-full rounded-lg border p-3" placeholder="Email" value={auth.email} onChange={e => setAuth({ ...auth, email: e.target.value })} /><input className="w-full rounded-lg border p-3" placeholder="First name" value={auth.first_name} onChange={e => setAuth({ ...auth, first_name: e.target.value })} /><input className="w-full rounded-lg border p-3" placeholder="Last name" value={auth.last_name} onChange={e => setAuth({ ...auth, last_name: e.target.value })} /><input className="w-full rounded-lg border p-3" placeholder="Phone" value={auth.phone} onChange={e => setAuth({ ...auth, phone: e.target.value })} /></>}
       {authMode === "officer-register" && <><select required className="w-full rounded-lg border p-3" value={auth.department} onChange={e => setAuth({ ...auth, department: e.target.value })}><option value="">Select your department</option>{departments.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}</select>{departments.length === 0 && <p className="text-sm text-amber-700">No departments are available. Ask an administrator to add departments before requesting an officer account.</p>}</>}
-      <input required type="password" className="w-full rounded-lg border p-3" placeholder="Password" value={auth.password} onChange={e => setAuth({ ...auth, password: e.target.value })} />
+      {authMode !== "forgot" && <input required type="password" className="w-full rounded-lg border p-3" placeholder="Password" value={auth.password} onChange={e => setAuth({ ...auth, password: e.target.value })} />}
       {(authMode === "register" || authMode === "officer-register") && <input required type="password" className="w-full rounded-lg border p-3" placeholder="Confirm password" value={auth.password_confirm} onChange={e => setAuth({ ...auth, password_confirm: e.target.value })} />}
       {error && <p className="rounded-lg bg-red-50 p-3 text-sm text-red-700">{error}</p>}
-      <button disabled={loading} className={`w-full rounded-lg p-3 font-semibold text-white disabled:opacity-60 ${authMode.startsWith("officer") ? "bg-slate-800" : "bg-blue-700"}`}>{loading ? "Please wait..." : authMode === "register" ? "Register" : authMode === "officer-register" ? "Submit officer request" : authMode === "officer" ? "Sign in to officer portal" : "Sign in"}</button>
+      <button disabled={loading} className={`w-full rounded-lg p-3 font-semibold text-white disabled:opacity-60 ${authMode.startsWith("officer") ? "bg-slate-800" : "bg-blue-700"}`}>{loading ? "Please wait..." : authMode === "register" ? "Register" : authMode === "officer-register" ? "Create officer account" : authMode === "officer" ? "Sign in to officer portal" : authMode === "forgot" ? resetStep === "request" ? "Send reset code" : "Change password" : "Sign in"}</button>
     </form>
     <div className="mt-5 flex flex-col gap-3 text-center text-sm">
-      {authMode === "login" && <><button onClick={() => { setAuthMode("register"); setError(""); setAuthSuccess(""); }} className="text-blue-700">New citizen? Create an account</button><button onClick={() => { setAuthMode("officer"); setError(""); setAuthSuccess(""); }} className="font-semibold text-slate-700">Officer portal sign in</button></>}
-      {authMode === "officer" && <><button onClick={() => { setAuthMode("officer-register"); setError(""); setAuthSuccess(""); }} className="font-semibold text-slate-700">Need an officer account? Request one</button><button onClick={() => { setAuthMode("login"); setError(""); setAuthSuccess(""); }} className="text-blue-700">Back to citizen sign in</button></>}
-      {authMode === "officer-register" && <button onClick={() => { setAuthMode("officer"); setError(""); setAuthSuccess(""); }} className="text-blue-700">Already requested? Officer sign in</button>}
+      {(authMode === "login" || authMode === "officer") && <><button onClick={() => { setAuthMode("forgot"); setResetStep("request"); setError(""); setAuthSuccess(""); }} className="text-blue-700">Forgot password?</button>{authMode === "login" ? <><button onClick={() => { setAuthMode("register"); setError(""); setAuthSuccess(""); }} className="text-blue-700">New citizen? Create an account</button><button onClick={() => { setAuthMode("officer"); setError(""); setAuthSuccess(""); }} className="font-semibold text-slate-700">Officer portal sign in</button></> : <button onClick={() => { setAuthMode("login"); setError(""); setAuthSuccess(""); }} className="text-blue-700">Back to citizen sign in</button>}</>}
+      {authMode === "forgot" && <button onClick={() => { setAuthMode("login"); setResetStep("request"); setError(""); setAuthSuccess(""); }} className="text-blue-700">Back to sign in</button>}
+      {authMode === "officer" && <button onClick={() => { setAuthMode("officer-register"); setError(""); setAuthSuccess(""); }} className="font-semibold text-slate-700">Need an officer account? Request one</button>}
+      {authMode === "officer-register" && <button onClick={() => { setAuthMode("officer"); setError(""); setAuthSuccess(""); }} className="text-blue-700">Already have an account? Officer sign in</button>}
       {authMode === "register" && <button onClick={() => { setAuthMode("login"); setError(""); setAuthSuccess(""); }} className="text-blue-700">Already registered? Sign in</button>}
     </div>
   </section></main>;
 
   const counts = { total: complaints.length, submitted: complaints.filter(c => c.status === "SUBMITTED").length, progress: complaints.filter(c => c.status === "IN_PROGRESS").length, resolved: complaints.filter(c => c.status === "RESOLVED").length };
-  return <div className="min-h-screen"><header className="bg-white shadow-sm"><div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-4"><div className="flex items-center gap-3"><div className="rounded-lg bg-blue-700 p-2 text-white"><MapPin /></div><div><h1 className="text-xl font-bold">CivicTrack</h1><p className="text-xs text-slate-500">Smart City Complaint & Resolution</p></div></div><div className="flex items-center gap-3"><div className="text-right"><p className="font-semibold">{user.username}</p><p className="text-xs text-slate-500">{user.role}</p></div><button onClick={signOut} className="flex items-center gap-2 rounded-lg border px-3 py-2 text-sm"><LogOut size={16} /> Logout</button></div></div></header>
-    <main className="mx-auto max-w-7xl px-4 py-8"><div className="mb-8 flex flex-wrap items-center justify-between gap-4"><div><h2 className="text-2xl font-bold">Complaint dashboard</h2><p className="mt-1 text-slate-500">Track reported issues and resolution progress.</p></div>{!isStaff && <button onClick={() => setShowForm(!showForm)} className="flex items-center gap-2 rounded-lg bg-blue-700 px-4 py-3 font-semibold text-white"><Plus size={18} /> Report an issue</button>}</div>
+  return <div className="min-h-screen"><header className="site-header"><div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-4"><div className="flex items-center gap-3"><div className="rounded-xl bg-blue-700 p-2.5 text-white shadow-md shadow-blue-200"><MapPin /></div><div><h1 className="text-xl font-bold tracking-tight">CivicTrack</h1><p className="text-xs text-slate-500">Smart City Complaint & Resolution</p></div></div><div className="flex items-center gap-3"><div className="text-right"><p className="font-semibold">{user.username}</p><p className="text-xs text-slate-500">{user.role}</p></div><button onClick={signOut} className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm hover:border-slate-300 hover:bg-slate-50"><LogOut size={16} /> Logout</button></div></div></header>
+    <main className="dashboard-main mx-auto max-w-7xl px-4 py-8"><div className="scroll-reveal mb-8 flex flex-wrap items-end justify-between gap-4"><div><p className="mb-2 text-xs font-bold uppercase tracking-[.18em] text-blue-700">CivicTrack overview</p><h2 className="text-3xl font-bold tracking-tight text-slate-900">Complaint dashboard</h2><p className="mt-2 text-slate-500">Track reported issues and resolution progress.</p></div>{!isStaff && <button onClick={() => { if (showForm) { setShowForm(false); setEditingId(null); } else { setForm({ title: "", description: "", category: "ROAD", location: "", latitude: "", longitude: "", image: null }); setEditingId(null); setShowForm(true); } }} className="primary-action flex items-center gap-2 rounded-xl bg-blue-700 px-5 py-3 font-semibold text-white hover:bg-blue-800"><Plus size={18} /> Report an issue</button>}</div>
       {notice && <p className="mb-4 rounded-lg bg-green-50 p-3 text-green-800">{notice}</p>}{error && <p className="mb-4 rounded-lg bg-red-50 p-3 text-red-800">{error}</p>}
-      <section className="mb-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4"><Stat label="Visible complaints" value={counts.total} icon={<ClipboardList />} /><Stat label="Submitted" value={counts.submitted} icon={<AlertCircle />} /><Stat label="In progress" value={counts.progress} icon={<RefreshCw />} /><Stat label="Resolved" value={counts.resolved} icon={<CheckCircle2 />} /></section>
-      {showForm && !isStaff && <section className="mb-8 rounded-2xl bg-white p-6 shadow-sm"><h3 className="mb-5 text-lg font-bold">Submit a complaint</h3><form onSubmit={handleCreate} className="grid gap-4 md:grid-cols-2">
+      <section className="mb-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4"><Stat label="Visible complaints" value={counts.total} icon={<ClipboardList />} delay={0} /><Stat label="Submitted" value={counts.submitted} icon={<AlertCircle />} delay={70} /><Stat label="In progress" value={counts.progress} icon={<RefreshCw />} delay={140} /><Stat label="Resolved" value={counts.resolved} icon={<CheckCircle2 />} delay={210} /></section>
+      {showForm && !isStaff && <section className="panel scroll-reveal mb-8 rounded-3xl bg-white p-6"><h3 className="mb-5 text-lg font-bold">{editingId ? "Edit complaint" : "Submit a complaint"}</h3><form onSubmit={handleCreate} className="grid gap-4 md:grid-cols-2">
         <input required className="rounded-lg border p-3" placeholder="Complaint title" value={form.title} onChange={e => setForm({ ...form, title: e.target.value })} /><select className="rounded-lg border p-3" value={form.category} onChange={e => setForm({ ...form, category: e.target.value })}>{categories.map(c => <option key={c}>{c}</option>)}</select>
-        <input required className="rounded-lg border p-3 md:col-span-2" placeholder="Location / street" value={form.location} onChange={e => setForm({ ...form, location: e.target.value })} /><textarea required rows="4" className="rounded-lg border p-3 md:col-span-2" placeholder="Describe the problem..." value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} /><input type="file" accept="image/*" className="rounded-lg border p-3 md:col-span-2" onChange={e => setForm({ ...form, image: e.target.files?.[0] ?? null })} />
-        <button disabled={loading} className="flex items-center justify-center gap-2 rounded-lg bg-blue-700 p-3 font-semibold text-white"><Send size={17} />{loading ? "Submitting..." : "Submit complaint"}</button>
+        <input required className="rounded-lg border p-3 md:col-span-2" placeholder="Location / street" value={form.location} onChange={e => setForm({ ...form, location: e.target.value })} /><GoogleMapPicker latitude={form.latitude} longitude={form.longitude} onSelect={point => setForm(current => ({ ...current, ...point }))} /><textarea required rows="4" className="rounded-lg border p-3 md:col-span-2" placeholder="Describe the problem..." value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} /><input type="file" accept="image/*" className="rounded-lg border p-3 md:col-span-2" onChange={e => setForm({ ...form, image: e.target.files?.[0] ?? null })} />
+        <div className="flex gap-2"><button disabled={loading} className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-blue-700 p-3 font-semibold text-white"><Send size={17} />{loading ? "Saving..." : editingId ? "Save changes" : "Submit complaint"}</button><button type="button" onClick={() => { setShowForm(false); setEditingId(null); setForm({ title: "", description: "", category: "ROAD", location: "", latitude: "", longitude: "", image: null }); }} className="rounded-lg border px-4">Cancel</button></div>
       </form></section>}
-      <section className="rounded-2xl bg-white p-5 shadow-sm"><div className="mb-5 flex flex-wrap items-center justify-between gap-3"><h3 className="text-lg font-bold">Complaints</h3><div className="flex flex-wrap gap-2"><input className="rounded-lg border p-2" placeholder="Search" value={search} onChange={e => setSearch(e.target.value)} /><select className="rounded-lg border p-2" value={filter} onChange={e => setFilter(e.target.value)}><option value="">All statuses</option>{["SUBMITTED", "IN_PROGRESS", "RESOLVED", "REJECTED"].map(s => <option key={s}>{s}</option>)}</select><button onClick={() => loadComplaints().catch(err => setError(JSON.stringify(err.response?.data ?? err.message)))} className="rounded-lg border p-2"><RefreshCw size={20} /></button></div></div>
-        {complaints.length === 0 ? <p className="py-12 text-center text-slate-500">No complaints found.</p> : <div className="space-y-4">{complaints.map(c => <article key={c.id} className="rounded-xl border p-4"><div className="flex flex-wrap items-start justify-between gap-3"><div><h4 className="font-bold">{c.title}</h4><p className="mt-1 text-sm text-slate-500">{c.category} · {c.location}</p></div><span className={`rounded-full px-3 py-1 text-xs font-semibold ${statusColors[c.status]}`}>{c.status.replace("_", " ")}</span></div><p className="my-3 text-sm">{c.description}</p>{c.image && <a className="text-sm text-blue-700 underline" href={c.image.startsWith("http") ? c.image : `http://127.0.0.1:8000${c.image}`} target="_blank" rel="noreferrer">View submitted photo</a>}<div className="mt-3 flex flex-wrap justify-between gap-3 border-t pt-3 text-xs text-slate-500"><span>ID: {c.complaint_id}</span><span>{new Date(c.created_at).toLocaleString()}</span></div>{c.resolution_remarks && <div className="mt-3 rounded-lg bg-green-50 p-3 text-sm text-green-800"><b>Resolution:</b> {c.resolution_remarks}</div>}{c.resolution_image && <a className="mt-2 inline-block text-sm text-green-800 underline" href={`http://127.0.0.1:8000${c.resolution_image}`} target="_blank" rel="noreferrer">View resolution photo</a>}
+      <section className="panel scroll-reveal rounded-3xl bg-white p-5 sm:p-6"><div className="mb-5 flex flex-wrap items-center justify-between gap-3"><div><p className="text-xs font-bold uppercase tracking-[.16em] text-slate-400">Reports</p><h3 className="mt-1 text-xl font-bold">Complaints</h3></div><div className="flex flex-wrap gap-2"><input className="rounded-xl border border-slate-200 bg-slate-50 p-2.5" placeholder="Search" value={search} onChange={e => setSearch(e.target.value)} /><select className="rounded-xl border border-slate-200 bg-slate-50 p-2.5" value={filter} onChange={e => setFilter(e.target.value)}><option value="">All statuses</option>{["SUBMITTED", "IN_PROGRESS", "RESOLVED", "REJECTED"].map(s => <option key={s}>{s}</option>)}</select><button onClick={() => loadComplaints().catch(err => setError(JSON.stringify(err.response?.data ?? err.message)))} className="rounded-xl border border-slate-200 bg-white p-2.5 hover:bg-slate-50" aria-label="Refresh complaints"><RefreshCw size={20} /></button></div></div>
+        {complaints.length === 0 ? <p className="py-12 text-center text-slate-500">No complaints found.</p> : <div className="space-y-4">{complaints.map(c => <article key={c.id} className="rounded-xl border p-4"><div className="flex flex-wrap items-start justify-between gap-3"><div><h4 className="font-bold">{c.title}</h4><p className="mt-1 text-sm text-slate-500">{c.category} · {c.location}</p>{c.latitude != null && c.longitude != null && <a className="mt-1 inline-block text-sm text-blue-700 underline" href={`https://www.google.com/maps/search/?api=1&query=${c.latitude},${c.longitude}`} target="_blank" rel="noreferrer">View location on Google Maps</a>}</div><span className={`rounded-full px-3 py-1 text-xs font-semibold ${statusColors[c.status]}`}>{c.status.replace("_", " ")}</span></div><p className="my-3 text-sm">{c.description}</p>{c.image && <a className="text-sm text-blue-700 underline" href={mediaUrl(c.image)} target="_blank" rel="noreferrer">View submitted photo</a>}<div className="mt-3 flex flex-wrap justify-between gap-3 border-t pt-3 text-xs text-slate-500"><span>ID: {c.complaint_id}</span><span>{new Date(c.created_at).toLocaleString()}</span></div>{c.resolution_remarks && <div className="mt-3 rounded-lg bg-green-50 p-3 text-sm text-green-800"><b>Resolution:</b> {c.resolution_remarks}</div>}{c.resolution_image && <a className="mt-2 inline-block text-sm text-green-800 underline" href={mediaUrl(c.resolution_image)} target="_blank" rel="noreferrer">View resolution photo</a>}
+          {user.role === "CITIZEN" && c.status === "SUBMITTED" && <button onClick={() => editComplaint(c)} className="mt-4 rounded-lg border border-blue-700 px-3 py-2 text-sm font-semibold text-blue-700">Edit complaint</button>}
+          {user.role === "CITIZEN" && c.status === "SUBMITTED" && <button onClick={() => removeComplaint(c)} className="ml-2 mt-4 rounded-lg border border-red-600 px-3 py-2 text-sm font-semibold text-red-700">Delete complaint</button>}
           {user.role === "OFFICER" && c.assigned_officer === user.id && c.status === "SUBMITTED" && <button onClick={() => startWork(c)} className="mt-4 rounded-lg bg-amber-600 px-3 py-2 text-sm font-semibold text-white">Start work</button>}
           {user.role === "OFFICER" && c.assigned_officer === user.id && c.status === "IN_PROGRESS" && (resolvingId === c.id ? <form onSubmit={e => resolveComplaint(e, c)} className="mt-4 grid gap-3 rounded-lg bg-slate-50 p-4"><label className="text-sm font-semibold">Resolution details<textarea required rows="3" className="mt-1 w-full rounded-lg border p-3 font-normal" value={resolution.remarks} onChange={e => setResolution({ ...resolution, remarks: e.target.value })} placeholder="Describe how the issue was fixed" /></label><label className="text-sm font-semibold">Completion photo<input required type="file" accept="image/*" className="mt-1 block w-full rounded-lg border p-3 font-normal" onChange={e => setResolution({ ...resolution, image: e.target.files?.[0] ?? null })} /></label><div className="flex gap-2"><button disabled={loading} className="rounded-lg bg-green-700 px-3 py-2 text-sm font-semibold text-white">{loading ? "Saving..." : "Confirm resolved"}</button><button type="button" onClick={() => setResolvingId(null)} className="rounded-lg border px-3 py-2 text-sm">Cancel</button></div></form> : <button onClick={() => { setResolvingId(c.id); setResolution({ remarks: "", image: null }); }} className="mt-4 rounded-lg bg-green-700 px-3 py-2 text-sm font-semibold text-white">Mark as resolved</button>)}
           {c.history?.length > 0 && <details className="mt-4"><summary className="cursor-pointer text-sm font-semibold text-blue-700">View status history</summary><div className="mt-3 space-y-3">{c.history.map(h => <div key={h.id} className="border-l-2 border-blue-200 pl-3 text-sm"><p className="font-semibold">{h.new_status.replace("_", " ")}</p>{h.remarks && <p className="text-slate-600">{h.remarks}</p>}<p className="text-xs text-slate-400">{new Date(h.created_at).toLocaleString()}</p></div>)}</div></details>}</article>)}</div>}</section></main></div>;
 }
-function Stat({ label, value, icon }) { return <div className="rounded-2xl bg-white p-5 shadow-sm"><div className="mb-3 flex items-center justify-between text-slate-500"><span className="text-sm">{label}</span>{icon}</div><p className="text-3xl font-bold">{value}</p></div>; }
+function Stat({ label, value, icon }) { return <div className="stat-card scroll-reveal rounded-2xl bg-white p-5"><div className="mb-3 flex items-center justify-between text-slate-500"><span className="text-sm">{label}</span><span className="stat-icon">{icon}</span></div><p className="text-3xl font-bold tracking-tight text-slate-900">{value}</p></div>; }
+function mediaUrl(path) { return path.startsWith("http") ? path : `http://127.0.0.1:8000${path.startsWith("/") ? path : `/${path}`}`; }

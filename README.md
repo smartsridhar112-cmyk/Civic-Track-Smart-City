@@ -42,6 +42,10 @@ npm run dev
 
 Open the Vite URL, normally http://localhost:5173. Backend API is at http://127.0.0.1:8000.
 
+## Google Maps complaint locations
+
+Copy `frontend/.env.example` to `frontend/.env` and set `VITE_GOOGLE_MAPS_API_KEY` to a Google Maps JavaScript API key. Enable the Maps JavaScript API for the key and restrict it to your app's website origins. Restart the Vite dev server after changing the key. Citizens can click the map or use their current location when submitting a complaint; saved coordinates are shown as a Google Maps link. Apply the coordinate fields with `python manage.py migrate` from `backend`.
+
 ## API endpoints
 
 - `POST /api/auth/register/` citizen registration
